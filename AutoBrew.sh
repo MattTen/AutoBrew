@@ -15,8 +15,12 @@ BREW_BIN="${BREW_PREFIX}/bin/brew"
 # Temporary HOME so root doesn't pollute a real user's home
 HOME="$(mktemp -d)"
 BREW_INSTALL_LOG=$(mktemp)
+AUTOBREW_LOG="/var/log/autobrew.log"
 export HOME
 trap "rm -rf '${HOME}'; rm -f '${BREW_INSTALL_LOG}'" EXIT
+
+exec > >(tee -a "${AUTOBREW_LOG}") 2>&1
+echo "=== AutoBrew started at $(date) ==="
 export USER=root
 export PATH="${BREW_PREFIX}/sbin:${BREW_PREFIX}/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 
@@ -128,8 +132,10 @@ fi
 
 if su - "${TargetUser}" -c "${BREW_BIN} doctor"; then
     echo "Homebrew installation complete! Your system is ready to brew."
+    echo "=== AutoBrew finished successfully at $(date) ==="
     exit 0
 else
     echo "AutoBrew installation failed."
+    echo "=== AutoBrew failed at $(date) — see above for details ==="
     exit 1
 fi
