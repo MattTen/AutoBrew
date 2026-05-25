@@ -120,42 +120,29 @@ if ! _devtools_ok; then
 
         rm -f /tmp/.com.apple.dt.CommandLineTools.installondemand.in-progress
 
-        if [ -z "${CLT_PKG}" ]; then
-            MACOS_VER=$(sw_vers -productVersion)
-            log "WARNING: Command Line Tools not found via softwareupdate on macOS ${MACOS_VER}."
-            if [ -n "${Password}" ]; then
-                # With credentials: osascript authenticates the request in the user's GUI session
-                log "Triggering CLT install via osascript (a dialog will appear on screen)..."
-                osascript -e "do shell script \"/usr/bin/xcode-select --install\" user name \"${TargetUser}\" password \"${Password}\" with administrator privileges" 2>/dev/null || true
-            else
-                # Without credentials: launchctl reaches the user's window server session
-                log "Triggering CLT install via launchctl (a dialog will appear on screen)..."
-                _tuid=$(id -u "${TargetUser}" 2>/dev/null)
-                [ -n "${_tuid}" ] && launchctl asuser "${_tuid}" /usr/bin/xcode-select --install 2>/dev/null || true
-            fi
-            log "Waiting up to 5 minutes for CLT installation..."
-            _clt_waited=0
-            while [ "${_clt_waited}" -lt 300 ]; do
-                sleep 20
-                _clt_waited=$((_clt_waited + 20))
-                if _devtools_ok; then
-                    log "CLT installed successfully."
-                    break
-                fi
-            done
-            if ! _devtools_ok; then
-                log "CLT installation timed out — proceeding anyway (Homebrew may fail)."
-                log "If it fails, install Xcode from: https://developer.apple.com/xcode/"
-            fi
-        fi
-
         if [ -n "${CLT_PKG}" ]; then
-            log "Installing CLT package: ${CLT_PKG}"
+            log "Installing CLT: ${CLT_PKG}"
             softwareupdate -i "${CLT_PKG}" --agree-to-license
+            /usr/bin/xcode-select --switch /Library/Developer/CommandLineTools
             if ! _devtools_ok; then
                 log "Xcode Command Line Tools installation failed"
                 exit 1
             fi
+        else
+            MACOS_VER=$(sw_vers -productVersion)
+            MACOS_MAJOR=$(echo "${MACOS_VER}" | cut -d. -f1)
+            MACOS_MINOR=$(echo "${MACOS_VER}" | cut -d. -f2)
+            # macOS 26.0 and 26.1: Apple did not publish CLT to the softwareupdate catalog.
+            # xcode-select --install also fails on these versions (confirmed Apple DTS, thread/821077).
+            # CLT becomes available starting macOS 26.2.
+            if [ "${MACOS_MAJOR}" -ge 26 ] && [ "${MACOS_MINOR:-0}" -lt 2 ]; then
+                log "ERROR: CLT unavailable on macOS ${MACOS_VER} — Apple has not published it yet."
+                log "Fix: upgrade this Mac to macOS 26.2+, then re-run AutoBrew."
+                log "Or pre-deploy CLT manually from: https://developer.apple.com/download/all/"
+                exit 1
+            fi
+            log "WARNING: CLT not found via softwareupdate on macOS ${MACOS_VER}."
+            log "Proceeding — Homebrew may fail if CLT are truly absent."
         fi
     fi
 fi
