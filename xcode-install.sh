@@ -89,8 +89,8 @@ touch "${SENTINEL}"
 trap "rm -f '${SENTINEL}'" EXIT
 
 _clt_grep() {
-    grep -E 'Command Line Tools' \
-    | sed 's/.*Label: //; s/.*\* //' \
+    grep -E '\* Label:.*Command Line Tools' \
+    | sed 's/.*Label: //' \
     | grep -v '^ *$' \
     | sort -V \
     | tail -1

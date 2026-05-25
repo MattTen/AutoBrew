@@ -103,7 +103,7 @@ if ! _devtools_ok; then
         log "Installing Xcode Command Line Tools..."
         touch /tmp/.com.apple.dt.CommandLineTools.installondemand.in-progress
 
-        _clt_grep() { grep -E 'Command Line Tools' | sed 's/.*Label: //;s/.*\* //' | grep -v '^ *$' | sort -V | tail -1; }
+        _clt_grep() { grep -E '\* Label:.*Command Line Tools' | sed 's/.*Label: //' | grep -v '^ *$' | sort -V | tail -1; }
 
         # 1. Default catalog as root (60s timeout)
         CLT_PKG=$(_with_timeout 60 softwareupdate -l 2>/dev/null | _clt_grep)
