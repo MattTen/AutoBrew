@@ -43,12 +43,36 @@ else
     exit 1
 fi
 
+# Pre-install Xcode Command Line Tools if missing (Homebrew requires them)
+if ! /usr/bin/xcode-select -p >/dev/null 2>&1; then
+    echo "Installing Xcode Command Line Tools..."
+    touch /tmp/.com.apple.dt.CommandLineTools.installondemand.in-progress
+    CLT_PKG=$(softwareupdate -l 2>/dev/null | \
+        grep -E '\* (Label: )?Command Line Tools' | \
+        sed 's/.*Label: //;s/.*\* //' | \
+        sort -V | tail -1)
+    if [ -z "${CLT_PKG}" ]; then
+        echo "Command Line Tools package not found via softwareupdate. Please install manually."
+        exit 1
+    fi
+    softwareupdate -i "${CLT_PKG}" --agree-to-license
+    rm -f /tmp/.com.apple.dt.CommandLineTools.installondemand.in-progress
+    if ! /usr/bin/xcode-select -p >/dev/null 2>&1; then
+        echo "Xcode Command Line Tools installation failed"
+        exit 1
+    fi
+fi
+
 # Install Homebrew:
 #   - NONINTERACTIVE=1 skips all interactive prompts (official Homebrew support)
-#   - sed patches out the root check (message unchanged as of 2026)
+#   - 1st sed: patches out the root check in install.sh (bash-level)
+#   - 2nd sed: skips the internal "brew update --force --quiet" that install.sh runs
+#     as root at the end — brew's Ruby binary has its own root check that blocks it.
+#     We already run "brew update --force" as the target user right after.
 NONINTERACTIVE=1 /bin/bash -c "$(curl -fsSL \
     https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh | \
-    sed "s/abort \"Don't run this as root\!\"/echo \"WARNING: Running as root...\"/")" \
+    sed "s/abort \"Don't run this as root\!\"/echo \"WARNING: Running as root...\"/" | \
+    sed 's|.*brew.* update --force --quiet.*|  echo "Skipping internal brew update (will run as target user)"|')" \
     2>&1 | tee "${BREW_INSTALL_LOG}"
 if [ "${PIPESTATUS[0]}" -ne 0 ]; then
     echo "Homebrew installer failed"
