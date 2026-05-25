@@ -136,9 +136,8 @@ if ! _devtools_ok; then
             fi
         fi
 
-        rm -f "${SENTINEL}"
-
         if [ -z "${CLT_PKG}" ]; then
+            rm -f "${SENTINEL}"
             log "ERROR: No CLT package found in the softwareupdate catalog on macOS ${MACOS_VER}."
             log "Manual option: download from https://developer.apple.com/download/all/"
             exit 1
@@ -147,6 +146,7 @@ if ! _devtools_ok; then
         log "Found package: ${CLT_PKG}"
         log "Installing... (this can take several minutes)"
         softwareupdate -i "${CLT_PKG}" --agree-to-license
+        rm -f "${SENTINEL}"
         /usr/bin/xcode-select --switch /Library/Developer/CommandLineTools
 
         if _devtools_ok; then
