@@ -25,15 +25,33 @@ log "=== AutoBrew started at $(date) ==="
 export USER=root
 export PATH="${BREW_PREFIX}/sbin:${BREW_PREFIX}/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 
-# Detect current console user
+# Detect current console user as default (overridden by --username if given)
 TargetUser=$(echo "show State:/Users/ConsoleUser" | \
     scutil | awk '/Name :/ && ! /loginwindow/ { print $3 }')
+Password=""
 
-# Jamf passes the target user as $3; direct CLI as $1
-if [ -n "$3" ]; then
-    TargetUser=$3
-elif [ -n "$1" ]; then
-    TargetUser=$1
+# Parse --username / --password flags.
+# Prepend $0 to handle both invocation styles:
+#   bash AutoBrew.sh --username u --password p   → $1=--username
+#   /bin/bash -c "$(curl ...)" --username u ...  → $0=--username
+_args=("$0" "$@")
+_i=0
+while [ "${_i}" -lt "${#_args[@]}" ]; do
+    case "${_args[${_i}]}" in
+        --username|-u) _i=$((_i + 1)); [ "${_i}" -lt "${#_args[@]}" ] && TargetUser="${_args[${_i}]}" ;;
+        --password|-p) _i=$((_i + 1)); [ "${_i}" -lt "${#_args[@]}" ] && Password="${_args[${_i}]}" ;;
+    esac
+    _i=$((_i + 1))
+done
+unset _i _args
+
+# Legacy positional fallback: Jamf $3 or direct CLI $1 (only if --username was not given)
+if [ -z "${TargetUser}" ]; then
+    if [ -n "$3" ] && [[ "$3" != -* ]]; then
+        TargetUser="$3"
+    elif [ -n "$1" ] && [[ "$1" != -* ]]; then
+        TargetUser="$1"
+    fi
 fi
 
 if [ -z "${TargetUser}" ]; then
@@ -49,14 +67,12 @@ else
 fi
 
 # Pre-install Xcode Command Line Tools if missing (Homebrew requires them)
-# Check if developer tools are available — xcode-select, CLT dir, Xcode.app, xcrun, or /usr/bin
+# Check if developer tools are available — xcode-select, CLT dir, Xcode.app, or xcrun
 _devtools_ok() {
     /usr/bin/xcode-select -p >/dev/null 2>&1 && return 0
     [ -d "/Library/Developer/CommandLineTools/usr/bin" ] && return 0
     [ -d "/Applications/Xcode.app/Contents/Developer" ] && return 0
     xcrun --find git >/dev/null 2>&1 && return 0
-    # macOS 26+ may bundle git/clang directly in /usr/bin without a separate CLT package
-    /usr/bin/git --version >/dev/null 2>&1 && /usr/bin/clang --version >/dev/null 2>&1 && return 0
     return 1
 }
 
@@ -85,7 +101,7 @@ if ! _devtools_ok; then
 
         # 3. As console user: modern macOS restricts catalog visibility differently for root
         if [ -z "${CLT_PKG}" ]; then
-            CLT_PKG=$(su - "${TargetUser}" -c "softwareupdate -l 2>/dev/null" | _clt_grep)
+            CLT_PKG=$(sudo -n -u "${TargetUser}" -H softwareupdate -l 2>/dev/null | _clt_grep)
         fi
 
         rm -f /tmp/.com.apple.dt.CommandLineTools.installondemand.in-progress
@@ -93,8 +109,30 @@ if ! _devtools_ok; then
         if [ -z "${CLT_PKG}" ]; then
             MACOS_VER=$(sw_vers -productVersion)
             log "WARNING: Command Line Tools not found via softwareupdate on macOS ${MACOS_VER}."
-            log "Attempting Homebrew install anyway — it may fail if CLT are truly missing."
-            log "If it fails, install Xcode from: https://developer.apple.com/xcode/"
+            if [ -n "${Password}" ]; then
+                # With credentials: osascript authenticates the request in the user's GUI session
+                log "Triggering CLT install via osascript (a dialog will appear on screen)..."
+                osascript -e "do shell script \"/usr/bin/xcode-select --install\" user name \"${TargetUser}\" password \"${Password}\" with administrator privileges" 2>/dev/null || true
+            else
+                # Without credentials: launchctl reaches the user's window server session
+                log "Triggering CLT install via launchctl (a dialog will appear on screen)..."
+                _tuid=$(id -u "${TargetUser}" 2>/dev/null)
+                [ -n "${_tuid}" ] && launchctl asuser "${_tuid}" /usr/bin/xcode-select --install 2>/dev/null || true
+            fi
+            log "Waiting up to 10 minutes for CLT installation..."
+            _clt_waited=0
+            while [ "${_clt_waited}" -lt 600 ]; do
+                sleep 30
+                _clt_waited=$((_clt_waited + 30))
+                if _devtools_ok; then
+                    log "CLT installed successfully."
+                    break
+                fi
+            done
+            if ! _devtools_ok; then
+                log "CLT installation timed out — proceeding anyway (Homebrew may fail)."
+                log "If it fails, install Xcode from: https://developer.apple.com/xcode/"
+            fi
         fi
 
         if [ -n "${CLT_PKG}" ]; then
@@ -151,13 +189,14 @@ fi
 
 unset HOME
 unset USER
+unset Password
 
 # Finalize the install as the target user
-su - "${TargetUser}" -c "${BREW_BIN} update --force" || { log "brew update failed"; exit 1; }
-su - "${TargetUser}" -c "${BREW_BIN} cleanup"
+sudo -n -u "${TargetUser}" -H "${BREW_BIN}" update --force || { log "brew update failed"; exit 1; }
+sudo -n -u "${TargetUser}" -H "${BREW_BIN}" cleanup
 
 # Run brew doctor and auto-apply any remediation commands it suggests
-doctor_cmds=$(su - "${TargetUser}" -c "${BREW_BIN} doctor 2>&1 | grep 'mkdir\|chown\|chmod\|echo\|&&'")
+doctor_cmds=$(sudo -n -u "${TargetUser}" -H "${BREW_BIN}" doctor 2>&1 | grep -E 'mkdir|chown|chmod|echo|&&')
 
 if [ -n "${doctor_cmds}" ]; then
     log "\"brew doctor\" failed. Attempting to repair..."
@@ -167,12 +206,12 @@ if [ -n "${doctor_cmds}" ]; then
             cmd_modified=$(echo "${line}" | sed "s/sudo //g; s/\$(whoami)/${TargetUser}/g")
             bash -c "${cmd_modified}"
         else
-            su - "${TargetUser}" -c "${line}"
+            sudo -n -u "${TargetUser}" -H bash -c "${line}"
         fi
     done <<< "${doctor_cmds}"
 fi
 
-if su - "${TargetUser}" -c "${BREW_BIN} doctor"; then
+if sudo -n -u "${TargetUser}" -H "${BREW_BIN}" doctor; then
     log "Homebrew installation complete! Your system is ready to brew."
     log "=== AutoBrew finished successfully at $(date) ==="
     exit 0
