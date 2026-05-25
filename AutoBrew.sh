@@ -49,12 +49,14 @@ else
 fi
 
 # Pre-install Xcode Command Line Tools if missing (Homebrew requires them)
-# Check if developer tools are available — xcode-select, CLT dir, Xcode.app, or xcrun
+# Check if developer tools are available — xcode-select, CLT dir, Xcode.app, xcrun, or /usr/bin
 _devtools_ok() {
     /usr/bin/xcode-select -p >/dev/null 2>&1 && return 0
     [ -d "/Library/Developer/CommandLineTools/usr/bin" ] && return 0
     [ -d "/Applications/Xcode.app/Contents/Developer" ] && return 0
     xcrun --find git >/dev/null 2>&1 && return 0
+    # macOS 26+ may bundle git/clang directly in /usr/bin without a separate CLT package
+    /usr/bin/git --version >/dev/null 2>&1 && /usr/bin/clang --version >/dev/null 2>&1 && return 0
     return 1
 }
 
@@ -90,16 +92,18 @@ if ! _devtools_ok; then
 
         if [ -z "${CLT_PKG}" ]; then
             MACOS_VER=$(sw_vers -productVersion)
-            log "ERROR: Command Line Tools not found via softwareupdate on macOS ${MACOS_VER}."
-            log "Install Xcode from the App Store or https://developer.apple.com/xcode/ then retry."
-            exit 1
+            log "WARNING: Command Line Tools not found via softwareupdate on macOS ${MACOS_VER}."
+            log "Attempting Homebrew install anyway — it may fail if CLT are truly missing."
+            log "If it fails, install Xcode from: https://developer.apple.com/xcode/"
         fi
 
-        log "Installing CLT package: ${CLT_PKG}"
-        softwareupdate -i "${CLT_PKG}" --agree-to-license
-        if ! _devtools_ok; then
-            log "Xcode Command Line Tools installation failed"
-            exit 1
+        if [ -n "${CLT_PKG}" ]; then
+            log "Installing CLT package: ${CLT_PKG}"
+            softwareupdate -i "${CLT_PKG}" --agree-to-license
+            if ! _devtools_ok; then
+                log "Xcode Command Line Tools installation failed"
+                exit 1
+            fi
         fi
     fi
 fi
