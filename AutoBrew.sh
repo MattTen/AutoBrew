@@ -117,7 +117,8 @@ fi
 NONINTERACTIVE=1 /bin/bash -c "$(curl -fsSL \
     https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh | \
     sed "s/abort \"Don't run this as root\!\"/echo \"WARNING: Running as root...\"/" | \
-    sed 's|.*"update".*"--force".*"--quiet".*|  echo "Skipping internal brew update (will run as target user)"|')" \
+    sed 's|.*"update".*"--force".*"--quiet".*|  echo "Skipping internal brew update (will run as target user)"|' | \
+    sed 's/should_install_command_line_tools && test -t 0/false/')" \
     2>&1 | tee "${BREW_INSTALL_LOG}"
 if [ "${PIPESTATUS[0]}" -ne 0 ]; then
     log "Homebrew installer failed"
