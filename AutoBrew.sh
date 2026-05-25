@@ -15,21 +15,13 @@ BREW_BIN="${BREW_PREFIX}/bin/brew"
 # Temporary HOME so root doesn't pollute a real user's home
 HOME="$(mktemp -d)"
 BREW_INSTALL_LOG=$(mktemp)
-export HOME
-
-# Logging: exec > >(tee ...) is silently ignored by bash 3.2 (/bin/bash on macOS).
-# Use an explicit FIFO so output goes to both stdout and the log file on all bash versions.
 AUTOBREW_LOG="/var/log/autobrew.log"
-_log_pipe=$(mktemp -t autobrew.XXXXXX)
-rm -f "${_log_pipe}"
-mkfifo "${_log_pipe}"
-tee -a "${AUTOBREW_LOG}" < "${_log_pipe}" &
-_log_tee_pid=$!
-exec 1>"${_log_pipe}" 2>&1
-rm -f "${_log_pipe}"
+export HOME
+trap "rm -rf '${HOME}'; rm -f '${BREW_INSTALL_LOG}'" EXIT
 
-trap "rm -rf '${HOME}'; rm -f '${BREW_INSTALL_LOG}'; wait ${_log_tee_pid}" EXIT
-echo "=== AutoBrew started at $(date) ==="
+# log() writes to stdout (captured by NinjaOne) AND to the persistent log file
+log() { echo "$@"; echo "$@" >> "${AUTOBREW_LOG}"; }
+log "=== AutoBrew started at $(date) ==="
 export USER=root
 export PATH="${BREW_PREFIX}/sbin:${BREW_PREFIX}/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 
@@ -45,34 +37,41 @@ elif [ -n "$1" ]; then
 fi
 
 if [ -z "${TargetUser}" ]; then
-    /bin/echo "'TargetUser' is empty. You must specify a user!"
+    log "'TargetUser' is empty. You must specify a user!"
     exit 1
 fi
 
 if /usr/bin/dscl . -read "/Users/${TargetUser}" >/dev/null 2>&1; then
-    /bin/echo "Validated ${TargetUser}"
+    log "Validated ${TargetUser}"
 else
-    /bin/echo "Specified user \"${TargetUser}\" is invalid"
+    log "Specified user \"${TargetUser}\" is invalid"
     exit 1
 fi
 
 # Pre-install Xcode Command Line Tools if missing (Homebrew requires them)
 if ! /usr/bin/xcode-select -p >/dev/null 2>&1; then
-    echo "Installing Xcode Command Line Tools..."
-    touch /tmp/.com.apple.dt.CommandLineTools.installondemand.in-progress
-    CLT_PKG=$(softwareupdate -l 2>/dev/null | \
-        grep -E '\* (Label: )?Command Line Tools' | \
-        sed 's/.*Label: //;s/.*\* //' | \
-        sort -V | tail -1)
-    if [ -z "${CLT_PKG}" ]; then
-        echo "Command Line Tools package not found via softwareupdate. Please install manually."
-        exit 1
-    fi
-    softwareupdate -i "${CLT_PKG}" --agree-to-license
-    rm -f /tmp/.com.apple.dt.CommandLineTools.installondemand.in-progress
-    if ! /usr/bin/xcode-select -p >/dev/null 2>&1; then
-        echo "Xcode Command Line Tools installation failed"
-        exit 1
+    if [ -d "/Library/Developer/CommandLineTools" ]; then
+        # Directory exists but xcode-select path is broken — just fix the pointer
+        log "Fixing Xcode Command Line Tools path..."
+        /usr/bin/xcode-select --switch /Library/Developer/CommandLineTools
+    else
+        log "Installing Xcode Command Line Tools..."
+        touch /tmp/.com.apple.dt.CommandLineTools.installondemand.in-progress
+        CLT_PKG=$(softwareupdate -l 2>/dev/null | \
+            grep -E 'Command Line Tools' | \
+            sed 's/.*Label: //;s/.*\* //' | \
+            grep -v '^ *$' | sort -V | tail -1)
+        if [ -z "${CLT_PKG}" ]; then
+            log "ERROR: Command Line Tools not found via softwareupdate."
+            log "Pre-install CLT via NinjaOne before running this script, then retry."
+            exit 1
+        fi
+        softwareupdate -i "${CLT_PKG}" --agree-to-license
+        rm -f /tmp/.com.apple.dt.CommandLineTools.installondemand.in-progress
+        if ! /usr/bin/xcode-select -p >/dev/null 2>&1; then
+            log "Xcode Command Line Tools installation failed"
+            exit 1
+        fi
     fi
 fi
 
@@ -85,10 +84,10 @@ fi
 NONINTERACTIVE=1 /bin/bash -c "$(curl -fsSL \
     https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh | \
     sed "s/abort \"Don't run this as root\!\"/echo \"WARNING: Running as root...\"/" | \
-    sed 's|.*brew.* update --force --quiet.*|  echo "Skipping internal brew update (will run as target user)"|')" \
+    sed 's|.*"update".*"--force".*"--quiet".*|  echo "Skipping internal brew update (will run as target user)"|')" \
     2>&1 | tee "${BREW_INSTALL_LOG}"
 if [ "${PIPESTATUS[0]}" -ne 0 ]; then
-    echo "Homebrew installer failed"
+    log "Homebrew installer failed"
     exit 1
 fi
 
@@ -120,16 +119,16 @@ unset HOME
 unset USER
 
 # Finalize the install as the target user
-su - "${TargetUser}" -c "${BREW_BIN} update --force" || { echo "brew update failed"; exit 1; }
+su - "${TargetUser}" -c "${BREW_BIN} update --force" || { log "brew update failed"; exit 1; }
 su - "${TargetUser}" -c "${BREW_BIN} cleanup"
 
 # Run brew doctor and auto-apply any remediation commands it suggests
 doctor_cmds=$(su - "${TargetUser}" -c "${BREW_BIN} doctor 2>&1 | grep 'mkdir\|chown\|chmod\|echo\|&&'")
 
 if [ -n "${doctor_cmds}" ]; then
-    echo "\"brew doctor\" failed. Attempting to repair..."
+    log "\"brew doctor\" failed. Attempting to repair..."
     while IFS= read -r line; do
-        echo "RUNNING: ${line}"
+        log "RUNNING: ${line}"
         if [[ "${line}" == *sudo* ]]; then
             cmd_modified=$(echo "${line}" | sed "s/sudo //g; s/\$(whoami)/${TargetUser}/g")
             bash -c "${cmd_modified}"
@@ -140,11 +139,11 @@ if [ -n "${doctor_cmds}" ]; then
 fi
 
 if su - "${TargetUser}" -c "${BREW_BIN} doctor"; then
-    echo "Homebrew installation complete! Your system is ready to brew."
-    echo "=== AutoBrew finished successfully at $(date) ==="
+    log "Homebrew installation complete! Your system is ready to brew."
+    log "=== AutoBrew finished successfully at $(date) ==="
     exit 0
 else
-    echo "AutoBrew installation failed."
-    echo "=== AutoBrew failed at $(date) — see above for details ==="
+    log "AutoBrew installation failed."
+    log "=== AutoBrew failed at $(date) — see above for details ==="
     exit 1
 fi
