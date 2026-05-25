@@ -49,11 +49,24 @@ else
 fi
 
 # Pre-install Xcode Command Line Tools if missing (Homebrew requires them)
-if ! /usr/bin/xcode-select -p >/dev/null 2>&1; then
+# Check if developer tools are available — xcode-select, CLT dir, Xcode.app, or xcrun
+_devtools_ok() {
+    /usr/bin/xcode-select -p >/dev/null 2>&1 && return 0
+    [ -d "/Library/Developer/CommandLineTools/usr/bin" ] && return 0
+    [ -d "/Applications/Xcode.app/Contents/Developer" ] && return 0
+    xcrun --find git >/dev/null 2>&1 && return 0
+    return 1
+}
+
+if ! _devtools_ok; then
     if [ -d "/Library/Developer/CommandLineTools" ]; then
         # Directory exists but xcode-select path is broken — just fix the pointer
         log "Fixing Xcode Command Line Tools path..."
         /usr/bin/xcode-select --switch /Library/Developer/CommandLineTools
+    elif [ -d "/Applications/Xcode.app/Contents/Developer" ]; then
+        # Full Xcode.app is installed — use it as the developer directory
+        log "Using Xcode.app as developer tools..."
+        /usr/bin/xcode-select -s /Applications/Xcode.app
     else
         log "Installing Xcode Command Line Tools..."
         touch /tmp/.com.apple.dt.CommandLineTools.installondemand.in-progress
@@ -63,7 +76,7 @@ if ! /usr/bin/xcode-select -p >/dev/null 2>&1; then
         # 1. Default catalog as root
         CLT_PKG=$(softwareupdate -l 2>/dev/null | _clt_grep)
 
-        # 2. --all flag: includes non-recommended packages (needed on new Macs / macOS 14+)
+        # 2. --all: includes non-recommended packages (needed on new Macs / macOS 14+)
         if [ -z "${CLT_PKG}" ]; then
             CLT_PKG=$(softwareupdate -l --all 2>/dev/null | _clt_grep)
         fi
@@ -76,14 +89,15 @@ if ! /usr/bin/xcode-select -p >/dev/null 2>&1; then
         rm -f /tmp/.com.apple.dt.CommandLineTools.installondemand.in-progress
 
         if [ -z "${CLT_PKG}" ]; then
-            log "ERROR: Command Line Tools not found via softwareupdate. Catalog output:"
-            softwareupdate -l 2>&1 | while IFS= read -r line; do log "  ${line}"; done
+            MACOS_VER=$(sw_vers -productVersion)
+            log "ERROR: Command Line Tools not found via softwareupdate on macOS ${MACOS_VER}."
+            log "Install Xcode from the App Store or https://developer.apple.com/xcode/ then retry."
             exit 1
         fi
 
         log "Installing CLT package: ${CLT_PKG}"
         softwareupdate -i "${CLT_PKG}" --agree-to-license
-        if ! /usr/bin/xcode-select -p >/dev/null 2>&1; then
+        if ! _devtools_ok; then
             log "Xcode Command Line Tools installation failed"
             exit 1
         fi
