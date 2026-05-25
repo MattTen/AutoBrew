@@ -205,6 +205,13 @@ unset Password
 
 # Finalize the install as the target user
 sudo -n -u "${TargetUser}" -H "${BREW_BIN}" update --force || { log "brew update failed"; exit 1; }
+
+# brew update creates new subdirectories (share/doc, var/homebrew/locks, etc.)
+# Re-chown after update to ensure the target user owns everything
+if [ "${ARCH}" = "arm64" ]; then
+    chown -R "${TargetUser}":admin "${BREW_PREFIX}"
+fi
+
 sudo -n -u "${TargetUser}" -H "${BREW_BIN}" cleanup
 
 # Run brew doctor and auto-apply any remediation commands it suggests
