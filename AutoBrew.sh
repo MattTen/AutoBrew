@@ -15,11 +15,20 @@ BREW_BIN="${BREW_PREFIX}/bin/brew"
 # Temporary HOME so root doesn't pollute a real user's home
 HOME="$(mktemp -d)"
 BREW_INSTALL_LOG=$(mktemp)
-AUTOBREW_LOG="/var/log/autobrew.log"
 export HOME
-trap "rm -rf '${HOME}'; rm -f '${BREW_INSTALL_LOG}'" EXIT
 
-exec > >(tee -a "${AUTOBREW_LOG}") 2>&1
+# Logging: exec > >(tee ...) is silently ignored by bash 3.2 (/bin/bash on macOS).
+# Use an explicit FIFO so output goes to both stdout and the log file on all bash versions.
+AUTOBREW_LOG="/var/log/autobrew.log"
+_log_pipe=$(mktemp -t autobrew.XXXXXX)
+rm -f "${_log_pipe}"
+mkfifo "${_log_pipe}"
+tee -a "${AUTOBREW_LOG}" < "${_log_pipe}" &
+_log_tee_pid=$!
+exec 1>"${_log_pipe}" 2>&1
+rm -f "${_log_pipe}"
+
+trap "rm -rf '${HOME}'; rm -f '${BREW_INSTALL_LOG}'; wait ${_log_tee_pid}" EXIT
 echo "=== AutoBrew started at $(date) ==="
 export USER=root
 export PATH="${BREW_PREFIX}/sbin:${BREW_PREFIX}/bin:/usr/bin:/bin:/usr/sbin:/sbin"
