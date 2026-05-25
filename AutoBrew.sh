@@ -57,17 +57,32 @@ if ! /usr/bin/xcode-select -p >/dev/null 2>&1; then
     else
         log "Installing Xcode Command Line Tools..."
         touch /tmp/.com.apple.dt.CommandLineTools.installondemand.in-progress
-        CLT_PKG=$(softwareupdate -l 2>/dev/null | \
-            grep -E 'Command Line Tools' | \
-            sed 's/.*Label: //;s/.*\* //' | \
-            grep -v '^ *$' | sort -V | tail -1)
+
+        _clt_grep() { grep -E 'Command Line Tools' | sed 's/.*Label: //;s/.*\* //' | grep -v '^ *$' | sort -V | tail -1; }
+
+        # 1. Default catalog as root
+        CLT_PKG=$(softwareupdate -l 2>/dev/null | _clt_grep)
+
+        # 2. --all flag: includes non-recommended packages (needed on new Macs / macOS 14+)
         if [ -z "${CLT_PKG}" ]; then
-            log "ERROR: Command Line Tools not found via softwareupdate."
-            log "Pre-install CLT via NinjaOne before running this script, then retry."
+            CLT_PKG=$(softwareupdate -l --all 2>/dev/null | _clt_grep)
+        fi
+
+        # 3. As console user: modern macOS restricts catalog visibility differently for root
+        if [ -z "${CLT_PKG}" ]; then
+            CLT_PKG=$(su - "${TargetUser}" -c "softwareupdate -l 2>/dev/null" | _clt_grep)
+        fi
+
+        rm -f /tmp/.com.apple.dt.CommandLineTools.installondemand.in-progress
+
+        if [ -z "${CLT_PKG}" ]; then
+            log "ERROR: Command Line Tools not found via softwareupdate. Catalog output:"
+            softwareupdate -l 2>&1 | while IFS= read -r line; do log "  ${line}"; done
             exit 1
         fi
+
+        log "Installing CLT package: ${CLT_PKG}"
         softwareupdate -i "${CLT_PKG}" --agree-to-license
-        rm -f /tmp/.com.apple.dt.CommandLineTools.installondemand.in-progress
         if ! /usr/bin/xcode-select -p >/dev/null 2>&1; then
             log "Xcode Command Line Tools installation failed"
             exit 1
