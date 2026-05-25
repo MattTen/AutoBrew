@@ -66,6 +66,20 @@ else
     exit 1
 fi
 
+# Run a command with a timeout (seconds). macOS has no GNU timeout — use background job.
+_with_timeout() {
+    local _t="$1"; shift
+    "$@" &
+    local _pid=$!
+    ( sleep "${_t}" && kill "${_pid}" 2>/dev/null ) &
+    local _w=$!
+    wait "${_pid}"
+    local _rc=$?
+    kill "${_w}" 2>/dev/null
+    wait "${_w}" 2>/dev/null
+    return "${_rc}"
+}
+
 # Pre-install Xcode Command Line Tools if missing (Homebrew requires them)
 # Check if developer tools are available — xcode-select, CLT dir, Xcode.app, or xcrun
 _devtools_ok() {
@@ -91,17 +105,17 @@ if ! _devtools_ok; then
 
         _clt_grep() { grep -E 'Command Line Tools' | sed 's/.*Label: //;s/.*\* //' | grep -v '^ *$' | sort -V | tail -1; }
 
-        # 1. Default catalog as root
-        CLT_PKG=$(softwareupdate -l 2>/dev/null | _clt_grep)
+        # 1. Default catalog as root (60s timeout)
+        CLT_PKG=$(_with_timeout 60 softwareupdate -l 2>/dev/null | _clt_grep)
 
         # 2. --all: includes non-recommended packages (needed on new Macs / macOS 14+)
         if [ -z "${CLT_PKG}" ]; then
-            CLT_PKG=$(softwareupdate -l --all 2>/dev/null | _clt_grep)
+            CLT_PKG=$(_with_timeout 60 softwareupdate -l --all 2>/dev/null | _clt_grep)
         fi
 
         # 3. As console user: modern macOS restricts catalog visibility differently for root
         if [ -z "${CLT_PKG}" ]; then
-            CLT_PKG=$(sudo -n -u "${TargetUser}" -H softwareupdate -l 2>/dev/null | _clt_grep)
+            CLT_PKG=$(_with_timeout 60 sudo -n -u "${TargetUser}" -H softwareupdate -l 2>/dev/null | _clt_grep)
         fi
 
         rm -f /tmp/.com.apple.dt.CommandLineTools.installondemand.in-progress
@@ -119,11 +133,11 @@ if ! _devtools_ok; then
                 _tuid=$(id -u "${TargetUser}" 2>/dev/null)
                 [ -n "${_tuid}" ] && launchctl asuser "${_tuid}" /usr/bin/xcode-select --install 2>/dev/null || true
             fi
-            log "Waiting up to 10 minutes for CLT installation..."
+            log "Waiting up to 5 minutes for CLT installation..."
             _clt_waited=0
-            while [ "${_clt_waited}" -lt 600 ]; do
-                sleep 30
-                _clt_waited=$((_clt_waited + 30))
+            while [ "${_clt_waited}" -lt 300 ]; do
+                sleep 20
+                _clt_waited=$((_clt_waited + 20))
                 if _devtools_ok; then
                     log "CLT installed successfully."
                     break
