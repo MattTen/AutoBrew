@@ -81,7 +81,6 @@ _with_timeout() {
 }
 
 # Pre-install Xcode Command Line Tools if missing (Homebrew requires them)
-# Check if developer tools are available — xcode-select, CLT dir, Xcode.app, or xcrun
 _devtools_ok() {
     /usr/bin/xcode-select -p >/dev/null 2>&1 && return 0
     [ -d "/Library/Developer/CommandLineTools/usr/bin" ] && return 0
@@ -91,58 +90,70 @@ _devtools_ok() {
 }
 
 if ! _devtools_ok; then
+    MACOS_VER=$(sw_vers -productVersion)
+    MACOS_MAJOR=$(echo "${MACOS_VER}" | cut -d. -f1)
+    MACOS_MINOR=$(echo "${MACOS_VER}" | cut -d. -f2)
+
+    if [ "${MACOS_MAJOR}" -ge 26 ] && [ "${MACOS_MINOR:-0}" -lt 2 ]; then
+        log "ERROR: CLT unavailable on macOS ${MACOS_VER}."
+        log "Apple has not published the CLT to the softwareupdate catalog on this version."
+        log "Fix: upgrade to macOS 26.2+, or download CLT manually from https://developer.apple.com/download/all/"
+        exit 1
+    fi
+
     if [ -d "/Library/Developer/CommandLineTools" ]; then
-        # Directory exists but xcode-select path is broken — just fix the pointer
-        log "Fixing Xcode Command Line Tools path..."
+        log "CLT directory exists but path is broken — fixing pointer..."
         /usr/bin/xcode-select --switch /Library/Developer/CommandLineTools
     elif [ -d "/Applications/Xcode.app/Contents/Developer" ]; then
-        # Full Xcode.app is installed — use it as the developer directory
-        log "Using Xcode.app as developer tools..."
+        log "Using installed Xcode.app as developer directory..."
         /usr/bin/xcode-select -s /Applications/Xcode.app
     else
-        log "Installing Xcode Command Line Tools..."
-        touch /tmp/.com.apple.dt.CommandLineTools.installondemand.in-progress
+        log "Xcode CLT not found — installing via softwareupdate..."
+        SENTINEL="/tmp/.com.apple.dt.CommandLineTools.installondemand.in-progress"
+        touch "${SENTINEL}"
 
-        _clt_grep() { grep -E '\* Label:.*Command Line Tools' | sed 's/.*Label: //' | grep -v '^ *$' | sort -V | tail -1; }
+        _clt_grep() {
+            grep -E '\* Label:.*Command Line Tools' \
+            | sed 's/.*Label: //' \
+            | grep -v '^ *$' \
+            | sort -V \
+            | tail -1
+        }
 
-        # 1. Default catalog as root (60s timeout)
-        CLT_PKG=$(_with_timeout 60 softwareupdate -l 2>/dev/null | _clt_grep)
+        log "Scanning softwareupdate catalog (attempt 1/3)..."
+        CLT_PKG=$(_with_timeout 60 softwareupdate -l 2>/dev/null | _clt_grep || true)
 
-        # 2. --all: includes non-recommended packages (needed on new Macs / macOS 14+)
         if [ -z "${CLT_PKG}" ]; then
-            CLT_PKG=$(_with_timeout 60 softwareupdate -l --all 2>/dev/null | _clt_grep)
+            log "Scanning with --all flag (attempt 2/3)..."
+            CLT_PKG=$(_with_timeout 60 softwareupdate -l --all 2>/dev/null | _clt_grep || true)
         fi
 
-        # 3. As console user: modern macOS restricts catalog visibility differently for root
         if [ -z "${CLT_PKG}" ]; then
-            CLT_PKG=$(_with_timeout 60 sudo -n -u "${TargetUser}" -H softwareupdate -l 2>/dev/null | _clt_grep)
-        fi
-
-        rm -f /tmp/.com.apple.dt.CommandLineTools.installondemand.in-progress
-
-        if [ -n "${CLT_PKG}" ]; then
-            log "Installing CLT: ${CLT_PKG}"
-            softwareupdate -i "${CLT_PKG}" --agree-to-license
-            /usr/bin/xcode-select --switch /Library/Developer/CommandLineTools
-            if ! _devtools_ok; then
-                log "Xcode Command Line Tools installation failed"
-                exit 1
+            if [ -n "${TargetUser}" ] && [ "${TargetUser}" != "root" ]; then
+                log "Scanning as console user '${TargetUser}' (attempt 3/3)..."
+                CLT_PKG=$(_with_timeout 60 sudo -n -u "${TargetUser}" -H \
+                    softwareupdate -l 2>/dev/null | _clt_grep || true)
             fi
+        fi
+
+        rm -f "${SENTINEL}"
+
+        if [ -z "${CLT_PKG}" ]; then
+            log "ERROR: No CLT package found in the softwareupdate catalog on macOS ${MACOS_VER}."
+            log "Manual option: download from https://developer.apple.com/download/all/"
+            exit 1
+        fi
+
+        log "Found package: ${CLT_PKG}"
+        log "Installing... (this can take several minutes)"
+        softwareupdate -i "${CLT_PKG}" --agree-to-license
+        /usr/bin/xcode-select --switch /Library/Developer/CommandLineTools
+
+        if _devtools_ok; then
+            log "Xcode Command Line Tools installed successfully: $(xcode-select -p)"
         else
-            MACOS_VER=$(sw_vers -productVersion)
-            MACOS_MAJOR=$(echo "${MACOS_VER}" | cut -d. -f1)
-            MACOS_MINOR=$(echo "${MACOS_VER}" | cut -d. -f2)
-            # macOS 26.0 and 26.1: Apple did not publish CLT to the softwareupdate catalog.
-            # xcode-select --install also fails on these versions (confirmed Apple DTS, thread/821077).
-            # CLT becomes available starting macOS 26.2.
-            if [ "${MACOS_MAJOR}" -ge 26 ] && [ "${MACOS_MINOR:-0}" -lt 2 ]; then
-                log "ERROR: CLT unavailable on macOS ${MACOS_VER} — Apple has not published it yet."
-                log "Fix: upgrade this Mac to macOS 26.2+, then re-run AutoBrew."
-                log "Or pre-deploy CLT manually from: https://developer.apple.com/download/all/"
-                exit 1
-            fi
-            log "WARNING: CLT not found via softwareupdate on macOS ${MACOS_VER}."
-            log "Proceeding — Homebrew may fail if CLT are truly absent."
+            log "ERROR: Installation completed but CLT are still not functional."
+            exit 1
         fi
     fi
 fi
