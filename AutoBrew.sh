@@ -1,97 +1,111 @@
-#!/bin/sh
-# AutoBrew - Install Homebrew with root
-# Source: https://github.com/kennyb-222/AutoBrew/
-# Author: Kenny Botelho
-# Version: 1.2
+#!/bin/bash
+# AutoBrew - Install Homebrew as root (Intel + Apple Silicon)
+# Based on: https://github.com/kennyb-222/AutoBrew/
+# Updated: 2026
 
-# Set environment variables
+# Detect architecture and set Homebrew prefix accordingly
+ARCH=$(uname -m)
+if [ "${ARCH}" = "arm64" ]; then
+    BREW_PREFIX="/opt/homebrew"
+else
+    BREW_PREFIX="/usr/local"
+fi
+BREW_BIN="${BREW_PREFIX}/bin/brew"
+
+# Temporary HOME so root doesn't pollute a real user's home
 HOME="$(mktemp -d)"
-export HOME
-export USER=root
-export PATH="/usr/local/sbin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 BREW_INSTALL_LOG=$(mktemp)
+export HOME
+trap "rm -rf '${HOME}'; rm -f '${BREW_INSTALL_LOG}'" EXIT
+export USER=root
+export PATH="${BREW_PREFIX}/sbin:${BREW_PREFIX}/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 
-# Get current logged in user
+# Detect current console user
 TargetUser=$(echo "show State:/Users/ConsoleUser" | \
     scutil | awk '/Name :/ && ! /loginwindow/ { print $3 }')
 
-# Check if parameter passed to use pre-defined user
+# Jamf passes the target user as $3; direct CLI as $1
 if [ -n "$3" ]; then
-    # Supporting running the script in Jamf with no specialization via Self Service
     TargetUser=$3
 elif [ -n "$1" ]; then
-    # Fallback case for the command line initiated method
     TargetUser=$1
 fi
 
-# Ensure TargetUser isn't empty
 if [ -z "${TargetUser}" ]; then
     /bin/echo "'TargetUser' is empty. You must specify a user!"
     exit 1
 fi
 
-# Verify the TargetUser is valid
-if /usr/bin/dscl . -read "/Users/${TargetUser}" 2>&1 >/dev/null; then
+if /usr/bin/dscl . -read "/Users/${TargetUser}" >/dev/null 2>&1; then
     /bin/echo "Validated ${TargetUser}"
 else
     /bin/echo "Specified user \"${TargetUser}\" is invalid"
     exit 1
 fi
 
-# Install Homebrew | strip out all interactive prompts
-/bin/bash -c "$(curl -fsSL \
-    https://raw.githubusercontent.com/Homebrew/install/master/install.sh | \
-    sed "s/abort \"Don't run this as root\!\"/\
-    echo \"WARNING: Running as root...\"/" | \
-    sed 's/  wait_for_user/  :/')" 2>&1 | tee "${BREW_INSTALL_LOG}"
+# Install Homebrew:
+#   - NONINTERACTIVE=1 skips all interactive prompts (official Homebrew support)
+#   - sed patches out the root check (message unchanged as of 2026)
+NONINTERACTIVE=1 /bin/bash -c "$(curl -fsSL \
+    https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh | \
+    sed "s/abort \"Don't run this as root\!\"/echo \"WARNING: Running as root...\"/")" \
+    2>&1 | tee "${BREW_INSTALL_LOG}"
+if [ "${PIPESTATUS[0]}" -ne 0 ]; then
+    echo "Homebrew installer failed"
+    exit 1
+fi
 
-# Reset Homebrew permissions for target user
-brew_file_paths=$(sed '1,/==> This script will install:/d;/==> /,$d' \
-    "${BREW_INSTALL_LOG}")
-brew_dir_paths=$(sed '1,/==> The following new directories/d;/==> /,$d' \
-    "${BREW_INSTALL_LOG}")
-# Get the paths for the installed brew binary
-brew_bin=$(echo "${brew_file_paths}" | grep "/bin/brew")
-brew_bin_path=${brew_bin%/brew}
-# shellcheck disable=SC2086
-chown -R "${TargetUser}":admin ${brew_file_paths} ${brew_dir_paths}
-chgrp admin ${brew_bin_path}/
-chmod g+w ${brew_bin_path}
+# Fix ownership so the target user (not root) owns the Homebrew install
+if [ "${ARCH}" = "arm64" ]; then
+    # Apple Silicon: Homebrew owns /opt/homebrew entirely — safe to chown the whole prefix
+    chown -R "${TargetUser}":admin "${BREW_PREFIX}"
+else
+    # Intel: /usr/local is a shared system directory — only chown what Homebrew touched
+    # Strip ANSI escape codes in case the log captured color output
+    clean_log=$(perl -pe 's/\e\[[0-9;]*m//g' "${BREW_INSTALL_LOG}")
+    brew_file_paths=$(echo "${clean_log}" | sed '1,/==> This script will install:/d;/==> /,$d')
+    brew_dir_paths=$(echo "${clean_log}" | sed '1,/==> The following new directories will be created:/d;/==> /,$d')
+    brew_bin_path="${BREW_BIN%/brew}"
 
-# Unset home/user environment variables
+    if [ -n "${brew_file_paths}" ]; then
+        # shellcheck disable=SC2086
+        chown -R "${TargetUser}":admin ${brew_file_paths}
+    fi
+    if [ -n "${brew_dir_paths}" ]; then
+        # shellcheck disable=SC2086
+        chown -R "${TargetUser}":admin ${brew_dir_paths}
+    fi
+    chgrp admin "${brew_bin_path}/"
+    chmod g+w "${brew_bin_path}"
+fi
+
 unset HOME
 unset USER
 
-# Finish up Homebrew install as target user
-su - "${TargetUser}" -c "${brew_bin} update --force"
+# Finalize the install as the target user
+su - "${TargetUser}" -c "${BREW_BIN} update --force" || { echo "brew update failed"; exit 1; }
+su - "${TargetUser}" -c "${BREW_BIN} cleanup"
 
-# Run cleanup before checking in with the doctor
-su - "${TargetUser}" -c "${brew_bin} cleanup"
+# Run brew doctor and auto-apply any remediation commands it suggests
+doctor_cmds=$(su - "${TargetUser}" -c "${BREW_BIN} doctor 2>&1 | grep 'mkdir\|chown\|chmod\|echo\|&&'")
 
-# Check for post-installation issues with "brew doctor"
-doctor_cmds=$(su - "${TargetUser}" -i -c "${brew_bin} doctor 2>&1 | grep 'mkdir\|chown\|chmod\|echo\|&&'")
-
-# Run "brew doctor" remediation commands
 if [ -n "${doctor_cmds}" ]; then
     echo "\"brew doctor\" failed. Attempting to repair..."
     while IFS= read -r line; do
         echo "RUNNING: ${line}"
         if [[ "${line}" == *sudo* ]]; then
-            # run command with variable substitution
-            cmd_modified=$(su - "${TargetUser}" -c "echo ${line}")
-            ${cmd_modified}
+            cmd_modified=$(echo "${line}" | sed "s/sudo //g; s/\$(whoami)/${TargetUser}/g")
+            bash -c "${cmd_modified}"
         else
-            # Run cmd as TargetUser
             su - "${TargetUser}" -c "${line}"
         fi
     done <<< "${doctor_cmds}"
 fi
 
-# Check Homebrew install status, check with the doctor status to see if everything looks good
-if su - "${TargetUser}" -i -c "${brew_bin} doctor"; then
-    echo 'Homebrew Installation Complete! Your system is ready to brew.'
+if su - "${TargetUser}" -c "${BREW_BIN} doctor"; then
+    echo "Homebrew installation complete! Your system is ready to brew."
     exit 0
 else
-    echo 'AutoBrew Installation Failed'
+    echo "AutoBrew installation failed."
     exit 1
 fi
