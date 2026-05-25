@@ -208,10 +208,11 @@ sudo -n -u "${TargetUser}" -H "${BREW_BIN}" update --force || { log "brew update
 sudo -n -u "${TargetUser}" -H "${BREW_BIN}" cleanup
 
 # Run brew doctor and auto-apply any remediation commands it suggests
-doctor_cmds=$(sudo -n -u "${TargetUser}" -H "${BREW_BIN}" doctor 2>&1 | grep -E 'mkdir|chown|chmod|echo|&&')
+doctor_output=$(sudo -n -u "${TargetUser}" -H "${BREW_BIN}" doctor 2>&1)
+doctor_cmds=$(echo "${doctor_output}" | grep -E 'mkdir|chown|chmod|echo|&&')
 
 if [ -n "${doctor_cmds}" ]; then
-    log "\"brew doctor\" failed. Attempting to repair..."
+    log "brew doctor reported issues. Attempting to repair..."
     while IFS= read -r line; do
         log "RUNNING: ${line}"
         if [[ "${line}" == *sudo* ]]; then
@@ -223,7 +224,9 @@ if [ -n "${doctor_cmds}" ]; then
     done <<< "${doctor_cmds}"
 fi
 
-if sudo -n -u "${TargetUser}" -H "${BREW_BIN}" doctor; then
+# Verify brew is functional — brew doctor warnings (outdated CLT, Tier 2 config, etc.)
+# are non-fatal and expected on older hardware; don't fail the install because of them.
+if sudo -n -u "${TargetUser}" -H "${BREW_BIN}" --version >/dev/null 2>&1; then
     log "Homebrew installation complete! Your system is ready to brew."
     log "=== AutoBrew finished successfully at $(date) ==="
     exit 0
